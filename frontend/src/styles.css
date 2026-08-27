@@ -132,6 +132,18 @@ main section {
   font-size: 0.85rem;
 }
 
+.promotion-form input.input-error,
+.promotion-form select.input-error {
+  border-color: var(--danger);
+  outline-color: var(--danger);
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 0.8rem;
+  margin: 0.25rem 0 0;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
