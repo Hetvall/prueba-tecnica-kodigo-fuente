@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master, dev]
+
+# Evita que el pipeline continúe si falta algún secreto/variable requerida.
+env:
+  POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+  POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+  POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+
+jobs:
+  check-secrets:
+    name: Verificar variables requeridas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Falla explícitamente si falta algún secreto obligatorio
+        run: |
+          missing=0
+          for var in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+            if [ -z "${!var}" ]; then
+              echo "::error::Falta el secreto/variable requerida: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "Configura los GitHub Secrets requeridos (ver .env.example) antes de ejecutar el pipeline."
+            exit 1
+          fi
+          echo "Todas las variables requeridas están presentes."
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+
+  lint:
+    name: Lint
+    needs: check-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Instalar dependencias backend
+        working-directory: backend
+        run: npm ci
+
+      - name: Instalar dependencias frontend
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint backend
+        working-directory: backend
+        run: npm run lint
+
+      - name: Typecheck backend
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Formato backend
+        working-directory: backend
+        run: npm run format:check
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Formato frontend
+        working-directory: frontend
+        run: npm run format:check
+
+  test:
+    name: Pruebas unitarias e integración
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ${{ secrets.POSTGRES_USER }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@localhost:5432/${{ secrets.POSTGRES_DB }}
+      PORT: 4000
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Instalar dependencias backend
+        working-directory: backend
+        run: npm ci
+
+      - name: Instalar dependencias frontend
+        working-directory: frontend
+        run: npm ci
+
+      - name: Aplicar migraciones de Prisma
+        working-directory: backend
+        run: npx prisma migrate deploy
+
+      - name: Tests backend (unit + integración)
+        working-directory: backend
+        run: npm test
+
+      - name: Tests frontend
+        working-directory: frontend
+        run: npm test
+
+  build:
+    name: Build de imágenes Docker
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build imagen backend
+        run: docker build -t promotions-backend:ci ./backend
+
+      - name: Build imagen frontend
+        run: docker build -t promotions-frontend:ci ./frontend
+
+  smoke-test:
+    name: Smoke test de integración (docker compose up)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Crear archivo .env para docker compose
+        run: |
+          cat <<EOF > .env
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          POSTGRES_PORT=5432
+          DATABASE_URL=postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@db:5432/${{ secrets.POSTGRES_DB }}
+          PORT=4000
+          NODE_ENV=production
+          FRONTEND_PORT=8080
+          EOF
+
+      - name: Construir y levantar la aplicación con docker compose
+        run: docker compose up -d --build db backend frontend
+
+      - name: Esperar a que los contenedores estén saludables
+        run: |
+          echo "Esperando a que el backend responda healthy..."
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q backend)" 2>/dev/null || echo "starting")
+            echo "Intento $i: backend=$status"
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 3
+          done
+
+      - name: Verificar /health del backend
+        run: |
+          response=$(curl -s -o response.json -w "%{http_code}" http://localhost:4000/health)
+          cat response.json
+          if [ "$response" != "200" ]; then
+            echo "::error::/health respondió $response en lugar de 200. El smoke test falla."
+            docker compose logs backend
+            exit 1
+          fi
+          echo "/health respondió 200 correctamente."
+
+      - name: Verificar que el frontend sirve la app
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          if [ "$response" != "200" ]; then
+            echo "::error::El frontend respondió $response en lugar de 200."
+            docker compose logs frontend
+            exit 1
+          fi
+
+      - name: Logs (siempre, para diagnóstico)
+        if: always()
+        run: docker compose logs
+
+      - name: Apagar contenedores
+        if: always()
+        run: docker compose down -v
