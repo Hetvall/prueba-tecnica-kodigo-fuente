@@ -83,6 +83,62 @@ npm run dev              # http://localhost:5173, con proxy a /api y /health del
 
 Scripts disponibles: `npm run lint`, `npm run typecheck`, `npm run format:check`, `npm test`, `npm run build`.
 
+## Estructura del proyecto
+
+```
+.
+├── backend/
+│   ├── src/
+│   │   ├── config/env.ts          # Carga y valida variables de entorno
+│   │   ├── domain/validation.ts   # Reglas de negocio puras (transiciones, validaciones)
+│   │   ├── routes/                # health, promotions, catalog (products/categories)
+│   │   ├── services/              # Orquestación entre rutas y Prisma
+│   │   ├── prisma/client.ts
+│   │   └── app.ts / index.ts
+│   ├── prisma/                    # schema.prisma + migraciones + seed
+│   └── tests/                     # Unitarias (validation) + integración (Supertest)
+├── frontend/
+│   ├── src/
+│   │   ├── api/client.ts
+│   │   ├── components/            # PromotionForm, PromotionList, StatusBadge, SummaryCards
+│   │   ├── hooks/usePromotions.ts  # React Query
+│   │   └── types.ts
+│   └── tests/                     # Testing Library
+├── .github/workflows/ci.yml       # lint → test → build → smoke test
+├── docker-compose.yml
+├── DECISIONS.md
+└── .env.example
+```
+
+## Variables de entorno
+
+Definidas en [`.env.example`](./.env.example); no contienen valores reales:
+
+| Variable            | Descripción                                                        |
+| ------------------- | -------------------------------------------------------------------|
+| `POSTGRES_USER`     | Usuario de la base de datos PostgreSQL                             |
+| `POSTGRES_PASSWORD` | Contraseña de la base de datos                                     |
+| `POSTGRES_DB`       | Nombre de la base de datos                                         |
+| `POSTGRES_PORT`     | Puerto expuesto en el host para PostgreSQL                         |
+| `DATABASE_URL`      | Cadena de conexión que usa Prisma (host `db` dentro de docker-compose) |
+| `PORT`              | Puerto interno del backend (Express)                               |
+| `NODE_ENV`          | Entorno de ejecución (`development` / `production` / `test`)       |
+| `FRONTEND_PORT`     | Puerto expuesto en el host para la app servida por Nginx           |
+
+En CI, estas mismas variables se inyectan como **GitHub Secrets** (ver sección [CI/CD](#cicd)) y nunca se hardcodean.
+
+## Testing
+
+- **Backend** (Vitest + Supertest): `backend/tests/validation.test.ts` cubre las reglas puras de `domain/validation.ts` (transiciones de estado, validaciones de campos) sin necesidad de base de datos; `backend/tests/promotions.api.test.ts` prueba los endpoints end-to-end contra una base de datos real (se omiten automáticamente si `DATABASE_URL` no está definida).
+- **Frontend** (Vitest + Testing Library): pruebas de componentes clave (`PromotionForm`, `StatusBadge`, `SummaryCards`).
+
+Ejecutar localmente:
+
+```bash
+cd backend && npm test
+cd frontend && npm test
+```
+
 ## Funcionalidad
 
 - **Crear promoción**: nombre, producto **o** categoría asociada, tipo de descuento (Porcentaje / Monto fijo), valor, fecha de inicio y fin.
@@ -130,3 +186,21 @@ Configura estos secretos en **Settings → Secrets and variables → Actions** d
 - `POSTGRES_DB`
 
 Ningún valor real de estas variables está presente en el repositorio; `.env.example` documenta su formato sin datos sensibles.
+
+## Agente de QA (`agent-review`)
+
+Este repositorio incluye un subagente de Claude Code en [`.claude/agents/agent-review.md`](./.claude/agents/agent-review.md) usado durante el desarrollo para auditar el cumplimiento de `prueba_tecnica.md`.
+
+- **Propósito:** revisar de forma independiente si cada criterio de evaluación (funcionales, validaciones, resumen, restricciones técnicas, CI/CD, manejo de secretos, entregables) está realmente implementado.
+- **Solo lectura:** no usa `Edit`/`Write` ni comandos que modifiquen el repo; solo `Read`, `Grep`, `Glob` y comandos de Bash no destructivos (`git status/log/diff`, `npm run lint/typecheck`, `npm test`, `npm run build`, `docker compose config`, `curl` a `/health`).
+- **No confía en el propio README/DECISIONS.md** como prueba: verifica contra el código, la configuración y, cuando es seguro, la ejecución real (tests, build, `/health`, workflow de CI).
+- **Salida:** un reporte con veredicto por criterio (✅/⚠️/❌/❓ no verificable), hallazgos priorizados y un veredicto global de cumplimiento.
+- **Cómo invocarlo:** en Claude Code, pedir "revisa/audita el proyecto contra la prueba técnica" (o invocar el agente `agent-review` directamente) dispara esta auditoría de solo verificación.
+
+## Entregables de la prueba técnica
+
+- [x] Repositorio con el código fuente (backend, frontend, docker-compose).
+- [x] `DECISIONS.md` con la justificación de las decisiones tecnológicas.
+- [x] `README.md` con los pasos para levantar el proyecto localmente (este archivo).
+- [x] `.env.example` con las variables requeridas, sin valores reales.
+- [x] Flujo de GitHub Actions (`lint → test → build → smoke test`) en `.github/workflows/ci.yml`.
